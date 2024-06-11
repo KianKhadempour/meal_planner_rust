@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE data SET mode = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "eee1820a6d3e2b93884d96821dbd97251c6ae08419974ea6e8972d00336be662"
+}

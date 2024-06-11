@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT recipe_id, tag_id FROM recipe_tags WHERE recipe_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "name": "recipe_id",
+        "ordinal": 0,
+        "type_info": "Int64"
+      },
+      {
+        "name": "tag_id",
+        "ordinal": 1,
+        "type_info": "Int64"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "e1789822ab24a5084d667c2f788a04ffc79a299a441bfa10405b72b828eba33c"
+}

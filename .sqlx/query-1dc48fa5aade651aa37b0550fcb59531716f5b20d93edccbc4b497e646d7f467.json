@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM previous_recipes",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "1dc48fa5aade651aa37b0550fcb59531716f5b20d93edccbc4b497e646d7f467"
+}

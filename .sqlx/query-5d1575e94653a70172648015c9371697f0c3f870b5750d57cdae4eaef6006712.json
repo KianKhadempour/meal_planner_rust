@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT mode, offset FROM data LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "mode",
+        "ordinal": 0,
+        "type_info": "Int64"
+      },
+      {
+        "name": "offset",
+        "ordinal": 1,
+        "type_info": "Int64"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "5d1575e94653a70172648015c9371697f0c3f870b5750d57cdae4eaef6006712"
+}
