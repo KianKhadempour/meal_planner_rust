@@ -1,9 +1,10 @@
 pub mod api {
-    use models::{Component, Recipe, RecipeList};
+    pub use models::Recipe;
+    use models::{Component, IncompatibleComponentError, RecipeList};
+    use reqwest::header::{ACCEPT, ACCEPT_ENCODING, HOST, USER_AGENT};
 
-    const BASE_URL: &str = "tasty.p.rapidapi.com";
+    const BASE_URL: &str = "https://tasty.p.rapidapi.com";
 
-    #[tokio::main]
     pub async fn get_recipes_list(
         offset: i64,
         size: i64,
@@ -12,9 +13,13 @@ pub mod api {
         let client = reqwest::Client::new();
         let response = client
             .get(BASE_URL.to_owned() + "/recipes/list")
-            .header("x-rapidapi-key", rapidapi_key)
-            .header("x-rapidapi-host", "tasty.p.rapidapi.com")
-            .form(&[("from", offset), ("size", size)])
+            .header("X-RAPIDAPI-KEY", rapidapi_key)
+            .header("X-RAPIDAPI-HOST", "tasty.p.rapidapi.com")
+            .header(USER_AGENT, "rust reqwest client")
+            .header(ACCEPT, "*/*")
+            .header(ACCEPT_ENCODING, "gzip, deflate")
+            .header(HOST, "tasty.p.rapidapi.com")
+            .query(&[("from", offset), ("size", size)])
             .send()
             .await?
             .json::<RecipeList>()
@@ -23,48 +28,137 @@ pub mod api {
         match response {
             Ok(recipe_list) => Ok(recipe_list.results),
             Err(e) => {
-                eprintln!("Failed to access the Tasty API!");
+                eprintln!("Failed to parse the API response!");
                 Err(e)
             }
         }
     }
 
-    pub async fn get_components(recipes: Vec<Recipe>) -> Result<Vec<Component>, sqlx::Error> {
-        todo!()
+    pub fn get_components(recipes: &Vec<Recipe>) -> Vec<Component> {
+        let mut ret: Vec<Component> = Vec::new();
+
+        for recipe in recipes {
+            for section in &recipe.sections {
+                for component in &section.components {
+                    ret.push(component.clone());
+                }
+            }
+        }
+
+        ret
     }
 
-    pub async fn make_shopping_list(components: Vec<Component>) -> String {
-        todo!()
+    pub fn make_shopping_list(
+        components: Vec<Component>,
+    ) -> Result<String, IncompatibleComponentError> {
+        let mut combined_components: Vec<Component> = Vec::new();
+        let mut ingredient_ids: Vec<i64> = Vec::new();
+
+        for component in components {
+            if ingredient_ids.contains(&component.ingredient.id) {
+                for (i, component_) in combined_components.clone().into_iter().enumerate() {
+                    if component.ingredient.id != component_.ingredient.id {
+                        continue;
+                    }
+
+                    combined_components[i] = (component_ + component.clone())?;
+                    break;
+                }
+            } else {
+                ingredient_ids.push(component.ingredient.id);
+                combined_components.push(component);
+            }
+        }
+
+        let mut shopping_list: Vec<String> = Vec::new();
+
+        for component in combined_components {
+            if component.measurements.len() == 0
+                || component
+                    .measurements
+                    .clone()
+                    .into_iter()
+                    .all(|m| m.quantity == 0.0)
+            {
+                shopping_list.push(component.ingredient.display_singular);
+            } else {
+                let quantity_str = if component.measurements[0].quantity.fract() == 0.0 {
+                    format!("{}", component.measurements[0].quantity as i64)
+                } else {
+                    format!("{:.2}", component.measurements[0].quantity)
+                };
+
+                let formatted_str = format!(
+                    "{}: {} {}",
+                    component.ingredient.display_singular,
+                    quantity_str,
+                    component.measurements[0].unit.abbreviation
+                );
+
+                shopping_list.push(formatted_str);
+            }
+        }
+
+        Ok(shopping_list.join("\n"))
     }
 
-    mod models {
+    pub mod models {
         use std::ops::Add;
 
         use thiserror::Error;
 
+        use serde::de::{self, Visitor};
         use serde::Deserialize;
 
         #[derive(Deserialize, Debug, Clone)]
         pub struct Unit {
             name: String,
+            pub abbreviation: String,
         }
 
-        #[derive(Deserialize, Debug)]
+        #[derive(Debug, Clone)]
         pub struct Measurement {
             id: i64,
-            quantity: f64,
-            unit: Unit,
+            pub quantity: f64,
+            pub unit: Unit,
         }
 
-        #[derive(Deserialize, Debug)]
+        struct MeasurementVisitor;
+
+        impl<'de> Visitor<'de> for MeasurementVisitor {
+            type Value = Measurement;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("Either a number or a weird unicode character like ⅔")
+            }
+
+            fn visit_string<E>(self, v: String) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                todo!()
+            }
+        }
+
+        impl<'de> Deserialize<'de> for Measurement {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                deserializer.deserialize_str(MeasurementVisitor)
+            }
+        }
+
+        #[derive(Deserialize, Debug, Clone)]
         pub struct Ingredient {
-            id: i64,
+            pub id: i64,
+            pub display_singular: String,
         }
 
-        #[derive(Deserialize, Debug)]
+        #[derive(Deserialize, Debug, Clone)]
         pub struct Component {
-            ingredient: Ingredient,
-            measurements: Vec<Measurement>,
+            pub ingredient: Ingredient,
+            pub measurements: Vec<Measurement>,
         }
 
         #[derive(Clone, Debug, Eq, Error, PartialEq)]
@@ -104,15 +198,21 @@ pub mod api {
 
         #[derive(Deserialize, Debug)]
         pub struct Section {
-            components: Vec<Component>,
+            pub components: Vec<Component>,
+        }
+
+        #[derive(Deserialize, Debug)]
+        pub struct Tag {
+            pub id: i64,
         }
 
         #[derive(Deserialize, Debug)]
         pub struct Recipe {
-            name: String,
-            id: i64,
-            slug: String,
-            sections: Vec<Section>,
+            pub name: String,
+            pub id: i64,
+            pub slug: String,
+            pub sections: Vec<Section>,
+            pub tags: Vec<Tag>,
         }
 
         #[derive(Deserialize, Debug)]
@@ -124,18 +224,43 @@ pub mod api {
 }
 
 pub mod utils {
-    use crate::database::models::Recipe;
+    use crate::api;
     use crate::database::{get_recipe_tags, recipe_exists};
     use sqlx::SqlitePool;
+    use std::process::Command;
     use text_io::try_read;
+
+    #[cfg(target_os = "windows")]
+    pub fn open_file(file_path: String) -> std::io::Result<()> {
+        Command::new("cmd")
+            .arg("/C")
+            .arg("start")
+            .arg("")
+            .arg(file_path)
+            .spawn()?;
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn open_file(file_path: String) -> std::io::Result<()> {
+        Command::new("xdg-open").arg(file_path).spawn()?;
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn open_file(file_path: String) -> std::io::Result<()> {
+        Command::new("open").arg(file_path).spawn()?;
+        Ok(())
+    }
+
     pub async fn remove_duplicate_recipes(
-        recipes: Vec<Recipe>,
+        recipes: Vec<api::Recipe>,
         pool: &SqlitePool,
-    ) -> Result<Vec<Recipe>, sqlx::Error> {
-        let mut unique_recipes: Vec<Recipe> = Vec::new();
+    ) -> Result<Vec<api::Recipe>, sqlx::Error> {
+        let mut unique_recipes: Vec<api::Recipe> = Vec::new();
 
         for recipe in recipes {
-            if !recipe_exists(&recipe, pool).await? {
+            if !recipe_exists(recipe.id, pool).await? {
                 unique_recipes.push(recipe);
             }
         }
@@ -174,11 +299,11 @@ pub mod utils {
     }
 
     pub async fn get_matching_recipes(
-        recipes: Vec<Recipe>,
+        recipes: Vec<api::Recipe>,
         n_recipes: i64,
         pool: &SqlitePool,
-    ) -> Result<Vec<Recipe>, sqlx::Error> {
-        let mut scores: Vec<(Recipe, i64)> = Vec::new();
+    ) -> Result<Vec<api::Recipe>, sqlx::Error> {
+        let mut scores: Vec<(api::Recipe, i64)> = Vec::new();
 
         for recipe in recipes {
             let mut recipe_score: i64 = 0;
@@ -271,8 +396,24 @@ pub mod utils {
 pub mod database {
     use crate::utils::models::Mode;
     use futures::future::join_all;
-    use models::{Data, Recipe, RecipeTag, Tag};
+    pub use models::Recipe;
+    use models::{Data, RecipeTag, Tag};
     use sqlx::{query, query_as, SqlitePool};
+
+    pub async fn data_table_exists(pool: &SqlitePool) -> Result<bool, sqlx::Error> {
+        Ok(query!("SELECT * FROM data LIMIT 1")
+            .fetch_optional(pool)
+            .await?
+            .is_some())
+    }
+
+    pub async fn create_data_table(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+        query!("INSERT INTO data DEFAULT VALUES")
+            .execute(pool)
+            .await?;
+
+        Ok(())
+    }
 
     pub async fn get_mode(pool: &SqlitePool) -> Result<Mode, sqlx::Error> {
         let data = query_as!(Data, "SELECT mode, offset FROM data LIMIT 1")
@@ -355,13 +496,82 @@ pub mod database {
         Ok(())
     }
 
-    pub async fn recipe_exists(recipe: &Recipe, pool: &SqlitePool) -> Result<bool, sqlx::Error> {
+    pub async fn recipe_exists(recipe_id: i64, pool: &SqlitePool) -> Result<bool, sqlx::Error> {
         Ok(
-            query!("SELECT * FROM recipes WHERE id = $1 LIMIT 1", recipe.id)
+            query!("SELECT * FROM recipes WHERE id = $1 LIMIT 1", recipe_id)
                 .fetch_optional(pool)
                 .await?
                 .is_some(),
         )
+    }
+
+    pub async fn store_tag(tag_id: i64, pool: &SqlitePool) -> Result<(), sqlx::Error> {
+        query!(
+            "INSERT OR IGNORE INTO tags (id, likes) VALUES ($1, 0)",
+            tag_id
+        )
+        .execute(pool)
+        .await?;
+
+        Ok(())
+    }
+    pub async fn store_recipe_tag_relationship(
+        recipe_id: i64,
+        tag_id: i64,
+        pool: &SqlitePool,
+    ) -> Result<(), sqlx::Error> {
+        store_tag(tag_id, pool).await?;
+
+        query!(
+            "INSERT INTO recipe_tags (recipe_id, tag_id) VALUES ($1, $2)",
+            recipe_id,
+            tag_id
+        )
+        .execute(pool)
+        .await?;
+
+        Ok(())
+    }
+
+    pub async fn store_recipe(
+        recipe: &crate::api::Recipe,
+        pool: &SqlitePool,
+    ) -> Result<(), sqlx::Error> {
+        query!(
+            "INSERT OR IGNORE INTO recipes (id, name) VALUES ($1, $2)",
+            recipe.id,
+            recipe.name,
+        )
+        .execute(pool)
+        .await?;
+
+        for tag in &recipe.tags {
+            store_recipe_tag_relationship(recipe.id, tag.id, pool).await?;
+        }
+
+        Ok(())
+    }
+
+    pub async fn store_previous_recipe(
+        recipe: &crate::api::Recipe,
+        pool: &SqlitePool,
+    ) -> Result<(), sqlx::Error> {
+        query!(
+            "INSERT INTO previous_recipes (recipe_id) VALUES ($1)",
+            recipe.id
+        )
+        .execute(pool)
+        .await?;
+
+        Ok(())
+    }
+
+    pub async fn increment_offset(n: i64, pool: &SqlitePool) -> Result<(), sqlx::Error> {
+        query!("UPDATE data SET offset = offset+$1", n)
+            .execute(pool)
+            .await?;
+
+        Ok(())
     }
 
     pub mod models {

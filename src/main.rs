@@ -1,43 +1,42 @@
 use meal_planner::{
-    api::{get_components, get_recipes_list, make_shopping_list},
+    api::{
+        get_components, get_recipes_list, make_shopping_list, models::IncompatibleComponentError,
+    },
     database::{
-        delete_previous_recipes, get_mode, get_offset, get_previous_recipes, get_recipe_tags,
-        models::Recipe, set_mode, update_tag_likes,
+        self, create_data_table, data_table_exists, delete_previous_recipes, get_mode, get_offset,
+        get_previous_recipes, get_recipe_tags, increment_offset, set_mode, store_previous_recipe,
+        store_recipe, update_tag_likes,
     },
     utils::{
         get_matching_recipes,
         models::{Mode, Rating},
-        remove_duplicate_recipes, validation_input,
+        open_file, remove_duplicate_recipes, validation_input,
     },
 };
 use spinoff::{spinners, Color, Spinner};
 use sqlx::{self, sqlite::SqlitePoolOptions, SqlitePool};
 
+use tokio::{fs::OpenOptions, io::AsyncWriteExt};
+
+use chrono::Utc;
+
 use std::env;
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Error, Debug)]
 enum PrepareError {
-    SqlError(sqlx::Error),
-    EnvError(env::VarError),
-    ReqError(reqwest::Error),
-}
-
-impl From<sqlx::Error> for PrepareError {
-    fn from(err: sqlx::Error) -> Self {
-        Self::SqlError(err)
-    }
-}
-
-impl From<env::VarError> for PrepareError {
-    fn from(err: env::VarError) -> Self {
-        Self::EnvError(err)
-    }
-}
-
-impl From<reqwest::Error> for PrepareError {
-    fn from(err: reqwest::Error) -> Self {
-        Self::ReqError(err)
-    }
+    #[error("sql error")]
+    SqlError(#[from] sqlx::Error),
+    #[error("environment variable error")]
+    EnvError(#[from] env::VarError),
+    #[error("reqwests error")]
+    ReqError(#[from] reqwest::Error),
+    #[error("incompatible component error")]
+    CmpError(#[from] IncompatibleComponentError),
+    #[error("file error")]
+    FileError(#[from] std::io::Error),
+    #[error("dotenv error")]
+    DotError(#[from] dotenv::Error),
 }
 
 async fn prepare(pool: &SqlitePool) -> Result<(), PrepareError> {
@@ -58,21 +57,72 @@ async fn prepare(pool: &SqlitePool) -> Result<(), PrepareError> {
 
     let mut spinner = Spinner::new(spinners::Arc, "Searching recipes...", Color::Blue);
     let all_recipes = remove_duplicate_recipes(
-        get_recipes_list(get_offset(pool).await?, 200, &string_key)?, // Currently broken, needs to use other `Recipe` type.
+        get_recipes_list(get_offset(pool).await?, 200, &string_key).await?,
         pool,
     )
     .await?;
     spinner.success("Done!");
 
     let recipes = get_matching_recipes(all_recipes, n_recipes, pool).await?;
-    let components = get_components(recipes).await?;
-    let shopping_list = make_shopping_list(components);
+    let components = get_components(&recipes);
+    let shopping_list = make_shopping_list(components)?;
+
+    let now = Utc::now();
+    let today = now.date_naive();
+    let time = now.format("%H:%M").to_string();
+
+    // Shopping List
+    let shopping_list_file_path = format!("shopping-list-{}.txt", today);
+    let mut shopping_list_file = OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(&shopping_list_file_path)
+        .await?;
+    let shopping_list_content = format!(
+        "{}\n{}\n{}\n\n",
+        time,
+        "-".repeat(time.len()),
+        shopping_list
+    );
+    shopping_list_file
+        .write_all(shopping_list_content.as_bytes())
+        .await?;
+
+    // Recipes
+    let recipes_file_path = format!("recipes-{}.txt", today);
+    let mut recipes_file = OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(&recipes_file_path)
+        .await?;
+    let recipes_content = format!(
+        "{}\n{}\n{}\n\n",
+        time,
+        "-".repeat(time.len()),
+        recipes
+            .iter()
+            .map(|r| format!("https://tasty.co/recipe/{}", r.slug))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    recipes_file.write_all(recipes_content.as_bytes()).await?;
+
+    open_file(shopping_list_file_path)?;
+    open_file(recipes_file_path)?;
+
+    for recipe in recipes {
+        store_recipe(&recipe, pool).await?;
+        store_previous_recipe(&recipe, pool).await?;
+    }
+
+    increment_offset(n_recipes, pool).await?;
+    set_mode(Mode::Review, pool).await?;
 
     Ok(())
 }
 
 async fn review(pool: &SqlitePool) -> Result<(), sqlx::Error> {
-    let previous_recipes: Vec<Recipe> = get_previous_recipes(&pool).await?;
+    let previous_recipes: Vec<database::Recipe> = get_previous_recipes(&pool).await?;
 
     for recipe in previous_recipes {
         let rating: Rating = validation_input(
@@ -96,19 +146,25 @@ async fn review(pool: &SqlitePool) -> Result<(), sqlx::Error> {
 
 #[tokio::main]
 async fn main() -> Result<(), PrepareError> {
+    dotenv::dotenv()?;
+
     let pool = SqlitePoolOptions::new()
         .max_connections(5)
-        .connect("sqlite://database.db")
+        .connect("sqlite://database.db?mode=rwc")
         .await?;
+
+    if !data_table_exists(&pool).await? {
+        create_data_table(&pool).await?;
+    }
 
     let mode = get_mode(&pool).await?;
 
     if mode == Mode::Prepare {
         println!("Preparing");
-        prepare(&pool).await?
+        prepare(&pool).await?;
     } else {
         println!("Reviewing");
-        review(&pool).await?
+        review(&pool).await?;
     }
 
     Ok(())
