@@ -1,11 +1,13 @@
+#![windows_subsystem = "console"]
+
 use meal_planner::{
     api::{
         get_components, get_recipes_list, make_shopping_list, models::IncompatibleComponentError,
     },
     database::{
-        self, create_data_table, data_table_exists, delete_previous_recipes, get_mode, get_offset,
-        get_previous_recipes, get_recipe_tags, increment_offset, set_mode, store_previous_recipe,
-        store_recipe, update_tag_likes,
+        self, create_tables, delete_previous_recipes, get_mode, get_offset, get_previous_recipes,
+        get_recipe_tags, increment_offset, populate_data_table, set_mode, store_previous_recipe,
+        store_recipe, tables_exist, update_tag_likes,
     },
     utils::{
         get_matching_recipes,
@@ -18,9 +20,12 @@ use sqlx::{self, sqlite::SqlitePoolOptions, SqlitePool};
 
 use tokio::{fs::OpenOptions, io::AsyncWriteExt};
 
-use chrono::Utc;
+use chrono::Local;
 
-use std::env;
+use std::{
+    env,
+    io::{self, Write},
+};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -35,8 +40,6 @@ enum PrepareError {
     CmpError(#[from] IncompatibleComponentError),
     #[error("file error")]
     FileError(#[from] std::io::Error),
-    #[error("dotenv error")]
-    DotError(#[from] dotenv::Error),
 }
 
 async fn prepare(pool: &SqlitePool) -> Result<(), PrepareError> {
@@ -48,7 +51,7 @@ async fn prepare(pool: &SqlitePool) -> Result<(), PrepareError> {
             string_key = s;
         }
         Err(e) => {
-            eprintln!("Please set the TASTY_API_KEY environment variable to your Tasty API key and try again.");
+            eprintln!("Please set the TASTY_API_KEY environment variable to your Tasty API key and try again.\nConsider using a .env file: https://hexdocs.pm/dotenvy/0.5.0/dotenv-file-format.html");
             return Err(e.into());
         }
     };
@@ -67,45 +70,52 @@ async fn prepare(pool: &SqlitePool) -> Result<(), PrepareError> {
     let components = get_components(&recipes);
     let shopping_list = make_shopping_list(components)?;
 
-    let now = Utc::now();
+    let now = Local::now();
     let today = now.date_naive();
-    let time = now.format("%H:%M").to_string();
+    let time = now.format("%I:%M %P").to_string();
 
     // Shopping List
     let shopping_list_file_path = format!("shopping-list-{}.txt", today);
-    let mut shopping_list_file = OpenOptions::new()
-        .append(true)
-        .create(true)
-        .open(&shopping_list_file_path)
-        .await?;
-    let shopping_list_content = format!(
-        "{}\n{}\n{}\n\n",
-        time,
-        "-".repeat(time.len()),
-        shopping_list
-    );
-    shopping_list_file
-        .write_all(shopping_list_content.as_bytes())
-        .await?;
+    {
+        let mut shopping_list_file = OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(&shopping_list_file_path)
+            .await?;
+        let shopping_list_content = format!(
+            "{}\n{}\n{}\n\n",
+            time,
+            "-".repeat(time.chars().count()),
+            shopping_list
+        );
+        shopping_list_file
+            .write_all(shopping_list_content.as_bytes())
+            .await?;
+
+        shopping_list_file.shutdown().await?;
+    }
 
     // Recipes
     let recipes_file_path = format!("recipes-{}.txt", today);
-    let mut recipes_file = OpenOptions::new()
-        .append(true)
-        .create(true)
-        .open(&recipes_file_path)
-        .await?;
-    let recipes_content = format!(
-        "{}\n{}\n{}\n\n",
-        time,
-        "-".repeat(time.len()),
-        recipes
-            .iter()
-            .map(|r| format!("https://tasty.co/recipe/{}", r.slug))
-            .collect::<Vec<_>>()
-            .join("\n")
-    );
-    recipes_file.write_all(recipes_content.as_bytes()).await?;
+    {
+        let mut recipes_file = OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(&recipes_file_path)
+            .await?;
+        let recipes_content = format!(
+            "{}\n{}\n{}\n\n",
+            time,
+            "-".repeat(time.chars().count()),
+            recipes
+                .iter()
+                .map(|r| format!("https://tasty.co/recipe/{}", r.slug))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        recipes_file.write_all(recipes_content.as_bytes()).await?;
+        recipes_file.shutdown().await?;
+    }
 
     open_file(shopping_list_file_path)?;
     open_file(recipes_file_path)?;
@@ -145,27 +155,37 @@ async fn review(pool: &SqlitePool) -> Result<(), sqlx::Error> {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), PrepareError> {
-    dotenv::dotenv()?;
+async fn main_() -> Result<(), PrepareError> {
+    dotenvy::dotenv().ok();
 
     let pool = SqlitePoolOptions::new()
         .max_connections(5)
         .connect("sqlite://database.db?mode=rwc")
         .await?;
 
-    if !data_table_exists(&pool).await? {
-        create_data_table(&pool).await?;
+    if !tables_exist(&pool).await {
+        create_tables(&pool).await?;
+        populate_data_table(&pool).await?;
     }
 
     let mode = get_mode(&pool).await?;
 
     if mode == Mode::Prepare {
-        println!("Preparing");
         prepare(&pool).await?;
     } else {
-        println!("Reviewing");
         review(&pool).await?;
     }
 
     Ok(())
+}
+
+fn main() {
+    main_().ok();
+
+    let mut lock = io::stdout().lock();
+    write!(lock, "Press enter to exit...").unwrap();
+    lock.flush().ok();
+
+    let mut buf = String::new();
+    std::io::stdin().read_line(&mut buf).ok();
 }

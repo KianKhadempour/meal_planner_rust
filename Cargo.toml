@@ -5,8 +5,9 @@ edition = "2021"
 
 [dependencies]
 chrono = "0.4.38"
-dotenv = "0.15.0"
+dotenvy = "0.15.7"
 futures = "0.3.30"
+phf = { version = "0.11.2", features = ["macros"] }
 reqwest = { version = "0.12.4", features = ["json"] }
 serde = "1.0.203"
 spinoff = "0.8.0"

@@ -107,8 +107,8 @@ pub mod api {
 
         use thiserror::Error;
 
-        use serde::de::{self, Visitor};
-        use serde::Deserialize;
+        use crate::utils::numeric;
+        use serde::{de, Deserialize, Deserializer};
 
         #[derive(Deserialize, Debug, Clone)]
         pub struct Unit {
@@ -116,37 +116,42 @@ pub mod api {
             pub abbreviation: String,
         }
 
-        #[derive(Debug, Clone)]
+        fn parse_float<'de, D>(deserializer: D) -> Result<f64, D::Error>
+        where
+            D: Deserializer<'de>,
+        {
+            let numeric_str = String::deserialize(deserializer)?;
+            let n_chars = numeric_str.split_whitespace().count();
+            let parsed: Result<f64, _> = numeric_str.parse();
+
+            if numeric_str.is_ascii() && parsed.is_ok() {
+                // Normal number
+                return Ok(parsed.unwrap());
+            } else if n_chars > 1 && n_chars < 3 {
+                // Mixed fraction
+                let mut split = numeric_str.split_whitespace();
+
+                let number_part: f64 = split.next().unwrap().parse().unwrap();
+                let fraction_part: f64 =
+                    numeric(&split.next().unwrap().chars().next().unwrap()).unwrap();
+
+                debug_assert!(split.next().is_none());
+
+                return Ok(number_part + fraction_part);
+            } else if n_chars == 1 {
+                numeric(&numeric_str.chars().next().unwrap())
+                    .ok_or(de::Error::custom("Not a fraction"))
+            } else {
+                panic!("BIG PROBLEM: {}", numeric_str);
+            }
+        }
+
+        #[derive(Deserialize, Debug, Clone)]
         pub struct Measurement {
             id: i64,
+            #[serde(deserialize_with = "parse_float")]
             pub quantity: f64,
             pub unit: Unit,
-        }
-
-        struct MeasurementVisitor;
-
-        impl<'de> Visitor<'de> for MeasurementVisitor {
-            type Value = Measurement;
-
-            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-                formatter.write_str("Either a number or a weird unicode character like ⅔")
-            }
-
-            fn visit_string<E>(self, v: String) -> Result<Self::Value, E>
-            where
-                E: de::Error,
-            {
-                todo!()
-            }
-        }
-
-        impl<'de> Deserialize<'de> for Measurement {
-            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-            where
-                D: serde::Deserializer<'de>,
-            {
-                deserializer.deserialize_str(MeasurementVisitor)
-            }
         }
 
         #[derive(Deserialize, Debug, Clone)]
@@ -226,9 +231,37 @@ pub mod api {
 pub mod utils {
     use crate::api;
     use crate::database::{get_recipe_tags, recipe_exists};
+    use phf::phf_map;
     use sqlx::SqlitePool;
     use std::process::Command;
     use text_io::try_read;
+
+    static NUMERIC: phf::Map<char, f64> = phf_map! {
+        '¼' => 0.25,
+        '½' => 0.5,
+        '¾' => 0.75,
+        '⅐' => 1_f64 / 7_f64,
+        '⅑' => 1_f64 / 9_f64,
+        '⅒' => 0.1,
+        '⅓' => 1_f64 / 3_f64,
+        '⅔' => 2_f64 / 3_f64,
+        '⅕' => 0.2,
+        '⅖' => 0.4,
+        '⅗' => 0.6,
+        '⅘' => 0.8,
+        '⅙' => 1_f64 / 6_f64,
+        '⅚' => 5_f64 / 6_f64,
+        '⅛' => 0.125,
+        '⅜' => 0.375,
+        '⅝' => 0.625,
+        '⅞' => 0.875,
+        '⅟' => 1.0,
+        '↉' => 0.0,
+    };
+
+    pub fn numeric(c: &char) -> Option<f64> {
+        NUMERIC.get(c).copied()
+    }
 
     #[cfg(target_os = "windows")]
     pub fn open_file(file_path: String) -> std::io::Result<()> {
@@ -400,14 +433,62 @@ pub mod database {
     use models::{Data, RecipeTag, Tag};
     use sqlx::{query, query_as, SqlitePool};
 
-    pub async fn data_table_exists(pool: &SqlitePool) -> Result<bool, sqlx::Error> {
-        Ok(query!("SELECT * FROM data LIMIT 1")
+    pub async fn tables_exist(pool: &SqlitePool) -> bool {
+        query!("SELECT * FROM data LIMIT 1")
             .fetch_optional(pool)
-            .await?
-            .is_some())
+            .await
+            .unwrap_or(None)
+            .is_some()
     }
 
-    pub async fn create_data_table(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+    pub async fn create_tables(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+        query!(
+            "CREATE TABLE IF NOT EXISTS `tags`( \
+                `id`    INT UNSIGNED NOT NULL PRIMARY KEY, \
+                `likes` INT NOT NULL \
+            )"
+        )
+        .execute(pool)
+        .await?;
+        query!(
+            "CREATE TABLE IF NOT EXISTS `recipes`( \
+                `id`   INT UNSIGNED NOT NULL PRIMARY KEY, \
+                `name` VARCHAR(255) NOT NULL \
+            )"
+        )
+        .execute(pool)
+        .await?;
+        query!(
+            "CREATE TABLE IF NOT EXISTS `previous_recipes`( \
+                `recipe_id`              INT UNSIGNED NOT NULL, \
+                FOREIGN KEY(`recipe_id`) REFERENCES recipes(`id`) \
+            )"
+        )
+        .execute(pool)
+        .await?;
+        query!(
+            "CREATE TABLE IF NOT EXISTS `recipe_tags`( \
+                `recipe_id`              INT UNSIGNED NOT NULL, \
+                `tag_id`                 INT UNSIGNED NOT NULL, \
+                FOREIGN KEY(`recipe_id`) REFERENCES recipes(`id`), \
+                FOREIGN KEY(`tag_id`)    REFERENCES tags(`id`) \
+            )"
+        )
+        .execute(pool)
+        .await?;
+        query!(
+            "CREATE TABLE IF NOT EXISTS `data`( \
+                `mode`   INT UNSIGNED NOT NULL DEFAULT 0, \
+                `offset` INT UNSIGNED NOT NULL DEFAULT 0 \
+            )"
+        )
+        .execute(pool)
+        .await?;
+
+        Ok(())
+    }
+
+    pub async fn populate_data_table(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         query!("INSERT INTO data DEFAULT VALUES")
             .execute(pool)
             .await?;

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO data DEFAULT VALUES",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "1f70b03acbc1c43272d86e3ec7b1c78722a7875135c33edf8dec3c4c678c0616"
+}

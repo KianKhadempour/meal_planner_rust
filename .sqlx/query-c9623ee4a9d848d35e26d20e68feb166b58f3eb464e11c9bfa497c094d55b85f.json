@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE data SET offset = offset+$1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "c9623ee4a9d848d35e26d20e68feb166b58f3eb464e11c9bfa497c094d55b85f"
+}
